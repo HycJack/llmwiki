@@ -1,0 +1,10 @@
+# Go build toolchain / caches (local only)
+.toolchain/
+
+# Build output and runtime data
+/bin/
+
+# Temp / crash artifacts
+*.log
+*.png
+crash_*.txt
