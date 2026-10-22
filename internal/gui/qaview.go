@@ -91,6 +91,7 @@ func (a *App) qaView(c *ui.Context) {
 				}
 				if len(result.Evidence) > 0 {
 					ui.Text(c, "引用出处（本地检索命中，点击可跳转到切片）").FontSize(12).FontWeight(600)
+					a.hitStrip(c, result.Evidence)
 					for i, e := range result.Evidence {
 						uid := strconv.Itoa(i + 1)
 						ev := e // capture for the closure below
@@ -182,6 +183,70 @@ func firstLine(s string) string {
 		return s[:i]
 	}
 	return s
+}
+
+// hitStrip renders "命中分布"(hit distribution / co-occurrence) for a question's
+// retrieved evidence: it groups the hits by owning document and draws one
+// proportional, accent-shaded segment per document, so the user instantly sees
+// which source the answer leans on — the retrieval counterpart of the static
+// slice-distribution strip on the KB detail page.
+func (a *App) hitStrip(c *ui.Context, ev []kbservice.Evidence) {
+	t := c.Theme()
+	total := len(ev)
+	if total == 0 {
+		return
+	}
+	keys, count, label := hitBuckets(ev)
+	// Solid segments, shaded by the largest share like kbview's distStrip.
+	maxC := 0
+	for _, n := range count {
+		if n > maxC {
+			maxC = n
+		}
+	}
+	ui.Column(c).FillWidth().Gap(4).Children(func() {
+		ui.Row(c).FillWidth().Gap(6).AlignItems(ui.Center).Children(func() {
+			ui.Text(c, "命中分布").FontSize(11).FontWeight(600)
+			ui.Text(c, fmt.Sprintf("%d 条证据 · %d 篇来源", total, len(keys))).FontSize(11).TextColor(t.TextMuted)
+		})
+		ui.Row(c).FillWidth().Gap(1).Children(func() {
+			for _, k := range keys {
+				ui.Box(c).Grow(float32(count[k]) / float32(total)).Shrink(0).Height(t.Space(3)).
+					Radius(2).Background(bucketColor(t, count[k], maxC)).
+					Tooltip(fmt.Sprintf("%s · %d 条命中", label[k], count[k]))
+			}
+		})
+		ui.Row(c).Wrap().GapX(8).GapY(2).Children(func() {
+			for _, k := range keys {
+				ui.Text(c, fmt.Sprintf("• %s (%d)", label[k], count[k])).FontSize(10.5).TextColor(t.TextMuted)
+			}
+		})
+	})
+}
+
+// hitBuckets groups evidence rows by their owning document, keeping first-hit
+// order, and returns the ordered keys plus per-key counts and display labels.
+func hitBuckets(ev []kbservice.Evidence) (keys []string, count map[string]int, label map[string]string) {
+	count = map[string]int{}
+	label = map[string]string{}
+	for _, e := range ev {
+		k := e.BaseName + "|" + e.DocID + "|" + e.Source
+		if count[k] == 0 {
+			keys = append(keys, k)
+			label[k] = firstLine(firstNonEmpty(e.Source, e.BaseName))
+		}
+		count[k]++
+	}
+	return keys, count, label
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // gotoEvidence navigates to the knowledge base + document + slice that an

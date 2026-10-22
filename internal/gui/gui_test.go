@@ -490,3 +490,33 @@ func TestImportURLClicked_RequiresOpenBaseAndURL(t *testing.T) {
 		t.Fatal("no import should have started for the rejected inputs")
 	}
 }
+
+// TestHitBuckets verifies the hit-distribution aggregation used by hitStrip:
+// evidence is grouped by owning document in first-hit order, with correct
+// counts and display labels.
+func TestHitBuckets(t *testing.T) {
+	ev := []kbservice.Evidence{
+		{BaseName: "kb", DocID: "d1", Source: "a.md", Text: "x"},
+		{BaseName: "kb", DocID: "d1", Source: "a.md", Text: "y"},
+		{BaseName: "kb", DocID: "d2", Source: "b.md", Text: "z"},
+		{BaseName: "kb", DocID: "d2", Source: "b.md", Text: "w"},
+		{BaseName: "kb", DocID: "d2", Source: "b.md", Text: "v"},
+		{BaseName: "kb", DocID: "d3", Source: "c.md", Text: "u"},
+	}
+	keys, count, label := hitBuckets(ev)
+	if len(keys) != 3 {
+		t.Fatalf("expected 3 buckets, got %d: %v", len(keys), keys)
+	}
+	if count[keys[0]] != 2 || count[keys[1]] != 3 || count[keys[2]] != 1 {
+		t.Fatalf("counts = %v, want d1=2 d2=3 d3=1", count)
+	}
+	// Labels fall back to the source path's first line.
+	if label[keys[0]] != "a.md" || label[keys[1]] != "b.md" {
+		t.Fatalf("labels = %v", label)
+	}
+	// Empty input yields empty buckets.
+	k2, c2, _ := hitBuckets(nil)
+	if len(k2) != 0 || len(c2) != 0 {
+		t.Fatalf("empty input should yield no buckets")
+	}
+}
