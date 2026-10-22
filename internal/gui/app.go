@@ -36,11 +36,15 @@ type App struct {
 
 	// Sidebar collapse state (KB tab).
 	sidebarCollapsed bool
+	// sidebarWidth is the user-chosen expanded sidebar width, draggable via the
+	// resize handle (onevra style); reset to default on a double-click.
+	sidebarWidth float32
 
 	// Knowledge bases.
-	curKB  *kbservice.KnowledgeBase // currently opened base; nil means none
-	kbs    []kbservice.KnowledgeBase
-	docSel int // selected document table row
+	curKB   *kbservice.KnowledgeBase // currently opened base; nil means none
+	kbs     []kbservice.KnowledgeBase
+	docSel  int    // selected document table row
+	hlChunk string // chunk id to visually highlight in the slice browser ("" = none)
 
 	newKBOpen    bool
 	newKBName    string
@@ -83,15 +87,16 @@ func New(root string) (*App, error) {
 		return nil, err
 	}
 	a := &App{
-		root:       root,
-		mgr:        mgr,
-		cfg:        cfg,
-		cfgDraft:   cfg,
-		curTab:     navKB,
-		status:     "就绪",
-		qaKBs:      map[string]bool{},
-		qaQuestion: "数据库如何组织数据？",
-		qaTopK:     "5",
+		root:         root,
+		mgr:          mgr,
+		cfg:          cfg,
+		cfgDraft:     cfg,
+		curTab:       navKB,
+		status:       "就绪",
+		sidebarWidth: 216,
+		qaKBs:        map[string]bool{},
+		qaQuestion:   "数据库如何组织数据？",
+		qaTopK:       "5",
 	}
 	// QA defaults to nothing selected; the KB tab opening a base also selects it.
 	a.reloadBases()

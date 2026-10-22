@@ -1,6 +1,7 @@
 package kbservice
 
 import (
+	"archive/zip"
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -371,6 +372,21 @@ func TestConfig_RoundTrip(t *testing.T) {
 	if !got.Configured() {
 		t.Fatal("configured() should be true")
 	}
+	// The API key must round-trip through encryption and must never appear in
+	// plaintext in the saved file.
+	if got.APIKey != cfg.APIKey {
+		t.Fatalf("api key did not round-trip: got %q want %q", got.APIKey, cfg.APIKey)
+	}
+	raw, err := os.ReadFile(configFilename(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "sk-x") {
+		t.Fatal("plaintext API key was persisted to disk")
+	}
+	if got.APIKeyCipher == "" {
+		t.Fatal("expected an encrypted api_key_cipher on disk")
+	}
 }
 
 func TestMockVec_Deterministic(t *testing.T) {
@@ -437,7 +453,112 @@ func TestImportURL_FetchesAndChunks(t *testing.T) {
 	}
 }
 
-// TestImportURL_RejectsBadInput guards the URL preconditions.
+// TestExportImport_RoundTrip packs a base and restores it into a fresh manager,
+// verifying the store survives.
+func TestExportImport_RoundTrip(t *testing.T) {
+	m, kb := newTestManager(t)
+	f := filepath.Join(t.TempDir(), "doc.md")
+	if err := os.WriteFile(f, []byte("# 文档\n\n可检索正文。"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Import(context.Background(), &kb, []string{f}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	zipPath := filepath.Join(t.TempDir(), "kb.zip")
+	if err := m.ExportBase(&kb, zipPath); err != nil {
+		t.Fatal(err)
+	}
+
+	m2, err := NewManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	kb2, err := m2.ImportBase("restored", zipPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kb2.Name != "restored" {
+		t.Fatalf("imported name=%q want restored", kb2.Name)
+	}
+	// The imported base is searchable (Chinese bigram).
+	idx, err := m2.IndexFor(&kb2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hits := idx.Search("检索", nil, 5)
+	if len(hits) == 0 {
+		t.Fatal("imported base content not retrievable")
+	}
+}
+
+// TestImportBase_ZipSlipRejected ensures an archive cannot escape its own dir.
+func TestImportBase_ZipSlipRejected(t *testing.T) {
+	m, err := NewManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Build a rogue zip containing a traversal entry.
+	zipPath := filepath.Join(t.TempDir(), "evil.zip")
+	w, err := os.Create(zipPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(w)
+	ew, err := zw.Create("../../escape.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ew.Write([]byte("boom"))
+	zw.Close()
+	w.Close()
+
+	if _, err := m.ImportBase("safe", zipPath); err == nil {
+		t.Fatal("expected zip-slip import to be rejected")
+	}
+}
+
+// TestIndexFor_CachedAndInvalidates verifies the build-once index memoization:
+// a repeated IndexFor returns the same instance, and InvalidateIndex forces a
+// fresh rebuild after an import.
+func TestIndexFor_CachedAndInvalidates(t *testing.T) {
+	m, kb := newTestManager(t)
+	idx1, err := m.IndexFor(&kb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if idx1 == nil {
+		t.Fatal("nil index")
+	}
+	idx2, err := m.IndexFor(&kb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if idx1 != idx2 {
+		t.Fatal("IndexFor should return the cached instance on repeat")
+	}
+
+	// Import a document, which must invalidate the cache.
+	f := filepath.Join(t.TempDir(), "a.md")
+	if err := os.WriteFile(f, []byte("# 中文主题\n\n这段讨论缓存与索引。"+strings.Repeat("词", 30)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Import(context.Background(), &kb, []string{f}, nil); err != nil {
+		t.Fatal(err)
+	}
+	idx3, err := m.IndexFor(&kb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if idx1 == idx3 {
+		t.Fatal("import must invalidate the cached index")
+	}
+	// The fresh index sees the imported chunk (Chinese bigram search).
+	hits := idx3.Search("缓存", nil, 5)
+	if len(hits) == 0 {
+		t.Fatalf("fresh index should retrieve the imported CJK chunk; got %+v", hits)
+	}
+}
 func TestImportURL_RejectsBadInput(t *testing.T) {
 	m, kb := newTestManager(t)
 	if _, err := m.ImportURL(context.Background(), &kb, "", nil); err == nil {

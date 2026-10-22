@@ -84,11 +84,14 @@ func (a *App) view(c *ui.Context) {
 
 // sidebar renders the onevra-style left navigation: a 知识库 / 问答 menu at the
 // top, a 新建知识库 action, and the 配置 entry pinned to the bottom. The active
-// menu item is highlighted. When collapsed it becomes a narrow rail.
+// menu item is highlighted. When collapsed it becomes a narrow rail. A thin
+// resize handle on the right edge lets the user drag the width, and a
+// double-click resets it (mirroring the onevra sidebar shell).
 func (a *App) sidebar(c *ui.Context, collapsed bool) {
 	t := c.Theme()
 	a.mu.Lock()
 	curTab := a.curTab
+	width := a.sidebarWidth
 	a.mu.Unlock()
 
 	if collapsed {
@@ -103,7 +106,7 @@ func (a *App) sidebar(c *ui.Context, collapsed bool) {
 		return
 	}
 
-	ui.Column(c).Width(216).MinWidth(0).Shrink(0).Background(t.Background).
+	ui.Column(c).Width(width).MinWidth(0).Shrink(0).Background(t.Background).
 		Border(1, t.Border).Padding(6).Gap(2).Children(func() {
 
 		// Navigation menu.
@@ -122,7 +125,7 @@ func (a *App) sidebar(c *ui.Context, collapsed bool) {
 				a.newKBName = ""
 				a.mu.Unlock()
 			}
-			if ui.Button(c, "▧ 收起侧边栏").FillWidth().TextAlign(ui.Start).Clicked() {
+			if ui.Button(c, "▧ 收起侧边栏（拖动右缘可调宽）").FillWidth().TextAlign(ui.Start).Clicked() {
 				a.mu.Lock()
 				a.sidebarCollapsed = true
 				a.mu.Unlock()
@@ -142,6 +145,26 @@ func (a *App) sidebar(c *ui.Context, collapsed bool) {
 			}
 		})
 	})
+
+	// Resize handle: an absolute overlay two pixels wide on the sidebar's right
+	// edge. Drag it to change the width; double-click to restore the default.
+	handle := ui.Box(c).Key("sidebar-resize").Absolute().Left(width - 2).Top(0).Bottom(0).
+		Width(5).Cursor(ui.CursorResizeEW).Role(ui.RoleSplitter).Label("侧边栏调宽")
+	next := width
+	if dx, _, held := handle.Dragged(); held {
+		next += dx
+	}
+	if next != width {
+		next = min(max(next, 160), 380)
+		a.mu.Lock()
+		a.sidebarWidth = next
+		a.mu.Unlock()
+	}
+	if handle.DoubleClicked() {
+		a.mu.Lock()
+		a.sidebarWidth = 216
+		a.mu.Unlock()
+	}
 }
 
 // navItem is one sidebar menu item; the active one is accented.

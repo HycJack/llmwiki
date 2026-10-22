@@ -299,11 +299,21 @@ func (a *App) chunkCards(c *ui.Context, kb *kbservice.KnowledgeBase, doc docRow)
 					if body == "" {
 						body = ch.Text
 					}
-					ui.Column(c).FillWidth().Background(t.Surface).Border(1, t.Border).
-						Radius(4).Padding(6, 8).Gap(2).Children(func() {
+					highlight := ch.ID != "" && ch.ID == a.hlChunk
+					card := ui.Column(c).FillWidth().Background(t.Surface).
+						Radius(4).Padding(6, 8).Gap(2)
+					if highlight {
+						card.Border(2, t.Accent)
+					} else {
+						card.Border(1, t.Border)
+					}
+					card.Children(func() {
 						ui.Row(c).FillWidth().Gap(6).AlignItems(ui.Center).Children(func() {
 							ui.Text(c, fmt.Sprintf("切片 %d/%d", i+1, len(cs))).FontSize(11).FontWeight(600)
 							ui.Text(c, fmt.Sprintf("%d 字符", runeLen(ch.Ctww))).FontSize(10.5).TextColor(t.TextMuted)
+							if highlight {
+								ui.Text(c, "● 引用来源").FontSize(10.5).TextColor(t.Accent)
+							}
 						})
 						ui.Text(c, body).FontSize(11.5).FillWidth()
 					})

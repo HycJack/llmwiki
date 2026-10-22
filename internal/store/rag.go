@@ -2,6 +2,7 @@ package store
 
 import (
 	"math"
+	"os"
 	"sort"
 	"strings"
 )
@@ -35,18 +36,20 @@ type Index struct {
 	docByID   map[string]*Document
 }
 
-// NewIndex builds an in-memory index from the store layers.
+// NewIndex builds an in-memory index from the store layers. A missing layer
+// file (an empty, not-yet-imported store) is treated as an empty layer rather
+// than an error, so opening a fresh knowledge base stays usable.
 func (s *Store) NewIndex() (*Index, error) {
 	chunks, err := s.ReadChunks()
-	if err != nil {
+	if err != nil && !os.IsNotExist(err) {
 		return nil, err
 	}
 	wiki, err := s.ReadWiki()
-	if err != nil {
+	if err != nil && !os.IsNotExist(err) {
 		return nil, err
 	}
 	docs, err := s.ReadDocuments()
-	if err != nil {
+	if err != nil && !os.IsNotExist(err) {
 		return nil, err
 	}
 	idx := &Index{
@@ -88,7 +91,7 @@ func (idx *Index) Search(query string, queryVec []float32, k int) []Lookup {
 			continue
 		}
 		l := Lookup{Kind: "chunk", ID: c.ID, Text: c.Ctww, DocID: c.DocID, SourceDocIDs: []string{c.DocID}}
-		l.Rank = kw + vecScore(queryVec, c.Vector)
+		l.Rank = blendScore(kw, vecScore(queryVec, c.Vector))
 		out = append(out, l)
 	}
 	// Keyword scores over wiki rows.
@@ -104,17 +107,60 @@ func (idx *Index) Search(query string, queryVec []float32, k int) []Lookup {
 			Kind: w.TypeKwd, ID: w.ID, Text: w.Content, ParentID: w.ParentID,
 			Slug: w.SlugKwd, SourceChunkIDs: srcChunks, SourceDocIDs: srcDocs,
 		}
-		l.Rank = kw + vecScore(queryVec, w.Vector)
+		l.Rank = blendScore(kw, vecScore(queryVec, w.Vector))
 		out = append(out, l)
 	}
+	// Sort by descending relevance, then keep top k while diversifying across
+	// documents so a single source does not swallow the whole answer set.
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Rank > out[j].Rank })
-	if len(out) > k {
-		out = out[:k]
+	return diverseTopK(out, k)
+}
+
+// blendScore combines keyword (0..1) and vector (0..1) evidence; when no query
+// vector is available the keyword term fully controls ranking.
+func blendScore(kw, vec float64) float64 {
+	return 0.65*kw + 0.35*vec
+}
+
+// diverseTopK keeps the best k results while allowing at most perDoc hits from
+// any single owning document, so multi-document bases produce a spread of
+// evidence rather than many fragments of the same file.
+func diverseTopK(hits []Lookup, k int) []Lookup {
+	if k <= 0 {
+		k = 5
+	}
+	if len(hits) <= k {
+		return hits
+	}
+	const perDoc = 2
+	var out []Lookup
+	docHits := map[string]int{}
+	for _, h := range hits {
+		if len(out) >= k {
+			break
+		}
+		doc := h.DocID
+		if doc == "" {
+			for _, id := range h.SourceDocIDs {
+				doc = id
+				break
+			}
+		}
+		if docHits[doc] >= perDoc {
+			continue
+		}
+		out = append(out, h)
+		docHits[doc]++
 	}
 	return out
 }
 
-// tokenize splits into lowercase terms, dropping common noise words.
+// tokenize splits s into lowercase terms, dropping common noise words. For
+// fields with CJK (Chinese) text it additionally emits character bigrams, so a
+// Chinese query like "数据库如何组织" yields 数据库/库如/如何/何组/组织 which
+// substring-match against a body that contains any of the bigrams. Without this,
+// an unspaced Chinese phrase is treated as one term and only matches if the
+// whole phrase appears verbatim — fragile for QA.
 func tokenize(s string) []string {
 	var terms []string
 	for _, f := range strings.Fields(s) {
@@ -124,7 +170,51 @@ func tokenize(s string) []string {
 		}
 		terms = append(terms, t)
 	}
+	// CJK bigrams over the whole source, so adjacent Han characters contribute
+	// substring terms regardless of spacing in the body.
+	for _, bg := range cjkBigrams(s) {
+		if bg == "" || stopwords[bg] {
+			continue
+		}
+		terms = append(terms, bg)
+	}
 	return terms
+}
+
+// cjkBigrams returns adjacent-pair bigrams for every run of consecutive CJK
+// characters in s. A single isolated Han character yields itself while a run of
+// length n yields n-1 bigrams. Duplicates are kept (the caller treats terms as
+// a bag).
+func cjkBigrams(s string) []string {
+	runes := []rune(s)
+	var out []string
+	i, n := 0, len(runes)
+	for i < n {
+		if !isCJK(runes[i]) {
+			i++
+			continue
+		}
+		j := i
+		for j < n && isCJK(runes[j]) {
+			j++
+		}
+		if j-i == 1 {
+			out = append(out, string(runes[i]))
+		} else {
+			for k := i; k+1 < j; k++ {
+				out = append(out, string(runes[k])+string(runes[k+1]))
+			}
+		}
+		i = j
+	}
+	return out
+}
+
+// isCJK reports whether r lies in a CJK unified ideographs block.
+func isCJK(r rune) bool {
+	return (r >= 0x4E00 && r <= 0x9FFF) || // CJK Unified Ideographs
+		(r >= 0x3400 && r <= 0x4DBF) || // Extension A
+		(r >= 0x20000 && r <= 0x2A6DF) // Extension B
 }
 
 // keywordScore counts how many distinct query terms appear in the body.

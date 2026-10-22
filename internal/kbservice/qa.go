@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-
-	"ragflow-llmwiki/internal/store"
 )
 
 // ChatFunc generates a natural-language answer given a system prompt and a user
@@ -16,12 +14,13 @@ type ChatFunc func(ctx context.Context, system, user string) (string, error)
 
 // Evidence is one retrieved passage with its provenance, ready to display.
 type Evidence struct {
-	Rank    float64 `json:"rank"`
-	DocID   string  `json:"doc_id"`
-	ChunkID string  `json:"chunk_id"`
-	Source  string  `json:"source"` // readable doc path or wiki page id
-	Text    string  `json:"text"`
-	Kind    string  `json:"kind"`
+	Rank     float64 `json:"rank"`
+	DocID    string  `json:"doc_id"`
+	ChunkID  string  `json:"chunk_id"`
+	Source   string  `json:"source"` // readable doc path or wiki page id
+	Text     string  `json:"text"`
+	Kind     string  `json:"kind"`
+	BaseName string  `json:"base_name"` // owning knowledge base name (for navigation)
 }
 
 // QAResult is the answer plus the evidence it rests on.
@@ -60,28 +59,25 @@ func (m *Manager) AskMulti(ctx context.Context, kbs []*KnowledgeBase, question s
 		if kb == nil {
 			continue
 		}
-		st, err := store.New(kb.StorePath())
-		if err != nil {
-			continue
-		}
-		idx, err := st.NewIndex()
+		idx, err := m.IndexFor(kb)
 		if err != nil {
 			continue
 		}
 		docPath := map[string]string{}
-		if docs, derr := st.ReadDocuments(); derr == nil {
+		if docs, derr := readDocs(kb.StorePath()); derr == nil {
 			for _, d := range docs {
 				docPath[d.ID] = d.Path
 			}
 		}
 		for _, h := range idx.Search(question, queryVec, topK) {
 			e := Evidence{
-				Rank:    h.Rank,
-				DocID:   h.DocID,
-				ChunkID: h.ID,
-				Source:  firstNonEmptyStr(docPath[h.DocID], h.Slug, h.ID),
-				Text:    h.Text,
-				Kind:    h.Kind,
+				Rank:     h.Rank,
+				DocID:    h.DocID,
+				ChunkID:  h.ID,
+				Source:   firstNonEmptyStr(docPath[h.DocID], h.Slug, h.ID),
+				Text:     h.Text,
+				Kind:     h.Kind,
+				BaseName: kb.Name,
 			}
 			key := kb.Name + "|" + e.ChunkID
 			if seen[key] {
@@ -103,7 +99,11 @@ func (m *Manager) AskMulti(ctx context.Context, kbs []*KnowledgeBase, question s
 	}
 	res.Evidence = union
 	if chat == nil {
+		// No model configured (offline / setup not finished): still give a
+		// readable, structured answer assembled from the retrieved evidence so
+		// the user is not staring at an empty answer box.
 		res.Generated = false
+		res.Answer = fallbackAnswer(question, res.Evidence)
 		return res
 	}
 
@@ -115,6 +115,27 @@ func (m *Manager) AskMulti(ctx context.Context, kbs []*KnowledgeBase, question s
 	res.Answer = strings.TrimSpace(answer)
 	res.Generated = true
 	return res
+}
+
+// fallbackAnswer builds a no-model answer by presenting the question and each
+// retrieved piece of evidence as a numbered Markdown item with its source, so
+// an offline session still returns something useful.
+func fallbackAnswer(question string, ev []Evidence) string {
+	var sb strings.Builder
+	sb.WriteString("（未配置问答模型，以下为检索到的原始片段）\n\n")
+	for i, e := range ev {
+		text := strings.TrimSpace(e.Text)
+		if len(text) > 600 {
+			text = text[:600] + "…"
+		}
+		fmt.Fprintf(&sb, "**[%d] %s**\n\n", i+1, firstNonEmptyStr(e.Source, "片段"))
+		sb.WriteString(text)
+		sb.WriteString("\n\n")
+	}
+	if len(ev) == 0 {
+		sb.WriteString("未检索到相关片段。")
+	}
+	return strings.TrimSpace(sb.String())
 }
 
 func systemPrompt(question string, ev []Evidence) string {

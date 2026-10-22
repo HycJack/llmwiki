@@ -14,7 +14,10 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
+
+	"ragflow-llmwiki/internal/store"
 )
 
 // KnowledgeBase is one searchable base: a directory under the data root. The
@@ -37,6 +40,13 @@ const storeDirName = "store"
 // Manager lists, creates, opens and deletes knowledge bases under a root.
 type Manager struct {
 	Root string
+
+	// idxCache memoizes each base's in-memory retrieval index so a question
+	// doesn't re-read and re-build the whole store on every Ask. It is
+	// invalidated by any write (import / delete / create). Access is guarded by
+	// idxMu.
+	idxMu    sync.Mutex
+	idxCache map[string]*store.Index
 }
 
 // NewManager returns a Manager rooted at root, creating the directory if
@@ -285,12 +295,51 @@ func (m *Manager) Delete(name string) error {
 	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
 		return fmt.Errorf("拒绝删除数据根之外的路径: %s", dir)
 	}
+	m.InvalidateIndex(&KnowledgeBase{Name: name, Dir: dir})
 	return os.RemoveAll(dir)
 }
 
 // StorePath returns the three-layer store directory of a base.
 func (kb *KnowledgeBase) StorePath() string {
 	return filepath.Join(kb.Dir, storeDirName)
+}
+
+// IndexFor returns the build-once, cached retrieval index for kb, rebuilding it
+// if it has been invalidated or never built. This removes the per-question
+// disk+runtime cost of reconstructing the whole index.
+func (m *Manager) IndexFor(kb *KnowledgeBase) (*store.Index, error) {
+	if kb == nil {
+		return nil, errors.New("知识库未打开")
+	}
+	m.idxMu.Lock()
+	defer m.idxMu.Unlock()
+	if m.idxCache == nil {
+		m.idxCache = map[string]*store.Index{}
+	}
+	if idx, ok := m.idxCache[kb.Dir]; ok && idx != nil {
+		return idx, nil
+	}
+	st, err := store.New(kb.StorePath())
+	if err != nil {
+		return nil, err
+	}
+	idx, err := st.NewIndex()
+	if err != nil {
+		return nil, err
+	}
+	m.idxCache[kb.Dir] = idx
+	return idx, nil
+}
+
+// InvalidateIndex drops any cached index for kb so the next IndexFor rebuilds
+// from the freshest store state.
+func (m *Manager) InvalidateIndex(kb *KnowledgeBase) {
+	if kb == nil {
+		return
+	}
+	m.idxMu.Lock()
+	delete(m.idxCache, kb.Dir)
+	m.idxMu.Unlock()
 }
 
 // Counts refreshes kb.DocCount / kb.ChunkCount from the current store state.

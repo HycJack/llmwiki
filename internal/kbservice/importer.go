@@ -114,6 +114,8 @@ func (m *Manager) importSources(ctx context.Context, kb *KnowledgeBase, files, u
 	kb.DocCount = len(docs)
 	kb.ChunkCount = len(chunks)
 	_ = m.writeMeta(*kb)
+	// Any cached retrieval index is now stale; rebuild lazily on next Ask.
+	m.InvalidateIndex(kb)
 	return results, nil
 }
 

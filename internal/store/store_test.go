@@ -142,3 +142,69 @@ func TestWriteBlob_PreservesBytes(t *testing.T) {
 		t.Fatalf("blob content = %q, want %q", string(data), "original bytes")
 	}
 }
+
+func TestTokenize_CJKBigrams(t *testing.T) {
+	// A long unspaced Chinese phrase must produce adjacent-character bigrams,
+	// so a body containing any of those substrings can be matched.
+	terms := tokenize("数据库如何组织数据")
+	joined := map[string]bool{}
+	for _, tt := range terms {
+		joined[tt] = true
+	}
+	// key adjacent bigrams expected for this phrase (数据库中 "数据","据库" …)
+	for _, want := range []string{"数据", "据库", "库如", "如何", "何组", "组织"} {
+		if !joined[want] {
+			t.Errorf("tokenize(数据库如何组织数据) missing bigram %q; terms=%v", want, terms)
+		}
+	}
+}
+
+func TestSearch_CJKSubstringMatch(t *testing.T) {
+	// A Chinese body that contains the query's bigram (but not the whole phrase
+	// verbatim) should still be retrieved — the previous whole-word tokenizer
+	// would have missed it.
+	dir := t.TempDir()
+	st, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.WriteChunks([]Chunk{
+		{ID: "zh-1", DocID: "doc-a", Text: "数据仓库用于组织海量数据。", Ctww: "数据仓库用于组织海量数据。"},
+		{ID: "zh-2", DocID: "doc-b", Text: "This English line has nothing relevant.", Ctww: "This English line has nothing relevant."},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	idx, err := st.NewIndex()
+	if err != nil {
+		t.Fatal(err)
+	}
+	hits := idx.Search("组织数据", nil, 5)
+	if len(hits) == 0 {
+		t.Fatal("expected a CJK bigram match on 组织数据")
+	}
+	if hits[0].ID != "zh-1" {
+		t.Fatalf("expected zh-1 to rank first, got %+v", hits)
+	}
+}
+
+func TestDiverseTopK_LimitsPerDocument(t *testing.T) {
+	hits := []Lookup{
+		{ID: "a1", DocID: "doc-a", Rank: 1.0},
+		{ID: "a2", DocID: "doc-a", Rank: 0.9},
+		{ID: "a3", DocID: "doc-a", Rank: 0.8},
+		{ID: "b1", DocID: "doc-b", Rank: 0.7},
+		{ID: "c1", DocID: "doc-c", Rank: 0.6},
+	}
+	out := diverseTopK(hits, 4)
+	if len(out) != 4 {
+		t.Fatalf("diverseTopK len=%d want 4: %+v", len(out), out)
+	}
+	docCount := map[string]int{}
+	for _, h := range out {
+		docCount[h.DocID]++
+	}
+	// doc-a must contribute at most 2 even though its top-3 are the best.
+	if docCount["doc-a"] > 2 {
+		t.Fatalf("doc-a contributed %d (>2) after diversity: %v", docCount["doc-a"], out)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/egoist/mygo/ui"
 
@@ -89,11 +90,18 @@ func (a *App) qaView(c *ui.Context) {
 					renderMarkdown(c, t, result.Answer)
 				}
 				if len(result.Evidence) > 0 {
-					ui.Text(c, "引用出处（本地检索命中）").FontSize(12).FontWeight(600)
+					ui.Text(c, "引用出处（本地检索命中，点击可跳转到切片）").FontSize(12).FontWeight(600)
 					for i, e := range result.Evidence {
 						uid := strconv.Itoa(i + 1)
-						ui.Text(c, fmt.Sprintf("[%s] %s  ·  %s\n%s", uid, e.Source, e.Kind, elide(e.Text, 240))).
-							FontSize(11.5).FillWidth().Padding(4, 2)
+						ev := e // capture for the closure below
+						row := ui.ButtonBase(c).FillWidth().Radius(4).Padding(4, 2).TextAlign(ui.Start).Children(func() {
+							ui.Text(c, fmt.Sprintf("[%s] %s", uid, firstLine(ev.Source))).FontSize(11.5).FontWeight(600)
+							ui.Text(c, fmt.Sprintf("%s  ·  %s  ·  %s", ev.BaseName, ev.Kind, elide(ev.Text, 240))).
+								FontSize(11).TextColor(t.TextMuted)
+						})
+						if row.Clicked() {
+							a.gotoEvidence(ev)
+						}
 					}
 				} else if !busy && result.Question != "" && result.Err == "" {
 					ui.Text(c, "未检索到相关片段。换个问法，或先导入更多文档。").FontSize(12)
@@ -167,4 +175,40 @@ func elide(s string, n int) string {
 		return s
 	}
 	return string(runes[:n]) + "…"
+}
+
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
+}
+
+// gotoEvidence navigates to the knowledge base + document + slice that an
+// answer citation came from, so the user can verify the exact source.
+func (a *App) gotoEvidence(e kbservice.Evidence) {
+	kb, err := a.mgr.Open(e.BaseName)
+	if err != nil {
+		a.setStatusf("打开知识库失败: %v", err)
+		return
+	}
+	_ = a.mgr.Counts(&kb)
+	a.mu.Lock()
+	copied := kb
+	a.curKB = &copied
+	a.curTab = navKB
+	a.hlChunk = e.ChunkID
+	a.mu.Unlock()
+
+	// Select the document that owns this evidence in the file table.
+	rows := a.docRows(a.curKB)
+	for i := range rows {
+		if rows[i].id == e.DocID {
+			a.mu.Lock()
+			a.docSel = i
+			a.mu.Unlock()
+			break
+		}
+	}
+	a.setStatusf("已定位证据来源：%s → %s", e.BaseName, firstLine(e.Source))
 }
